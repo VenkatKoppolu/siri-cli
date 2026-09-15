@@ -2,11 +2,17 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { Connection, SfError, Logger } from '@salesforce/core';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const BASE64_REGEX = /^[A-Za-z0-9+/]*={0,2}$/;
+// Path separators, shell/Windows-forbidden punctuation and ASCII control characters.
+// eslint-disable-next-line no-control-regex
+const INVALID_FILENAME_CHARS = /[<>:"|?*\\/\u0000-\u001f]/g;
+// Windows reserved device names (CON, NUL, COM1, ...) cannot be created as files.
+const WINDOWS_RESERVED_NAMES = /^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$/i;
 const DEFAULT_CONCURRENCY = 10;
 const DEFAULT_MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024; // 100 MB
 
@@ -38,14 +44,13 @@ export type FileExportError = {
   timestamp: Date;
 };
 
+/**
+ * A record returned by a SOQL query. Salesforce returns field names exactly as
+ * written in the query (Id, Name, Body, VersionData, ContentDocument.Title ...),
+ * so the type is intentionally open.
+ */
 export type FileRecord = {
-  id: string;
-  name: string;
-  size?: number;
-  contentType?: string;
-  body?: string;
-  versionData?: string;
-  data?: string;
+  Id?: string;
   [key: string]: unknown;
 };
 
@@ -84,6 +89,7 @@ export class FileExport {
     this.logger.info(`Found ${fileRecords.length} files to export`);
 
     const concurrency = options.concurrency ?? DEFAULT_CONCURRENCY;
+    const { nameField } = this.getFileTypeConfig(options.fileType);
     // Track seen filenames to prevent silent overwrites
     const seenNames = new Set<string>();
 
@@ -100,9 +106,10 @@ export class FileExport {
           filesExported++;
           totalSize += outcome.value.size;
         } else if (outcome.status === 'rejected') {
+          const recordId = FileExport.idOf(record);
           errors.push({
-            fileName: String(record.name ?? record.id),
-            recordId: record.id,
+            fileName: String(this.resolveFieldPath(record, nameField) ?? recordId),
+            recordId,
             error: outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason),
             timestamp: new Date(),
           });
@@ -126,8 +133,9 @@ export class FileExport {
    */
   public validateWritePermissions(dirPath: string): void {
     try {
-      const testFile = path.join(dirPath, `.write-test-${Date.now()}`);
-      fs.writeFileSync(testFile, 'test');
+      // Unique, owner-only probe file; 'wx' refuses to clobber anything that already exists.
+      const testFile = path.join(dirPath, `.write-test-${process.pid}-${randomBytes(8).toString('hex')}`);
+      fs.writeFileSync(testFile, 'test', { flag: 'wx', mode: 0o600 });
       fs.unlinkSync(testFile);
     } catch (err) {
       throw new SfError(
@@ -174,6 +182,12 @@ export class FileExport {
 
   // ── Private ─────────────────────────────────────────────────────────────────
 
+  /** Salesforce returns the record ID as `Id`; tolerate `id` for hand-built records. */
+  private static idOf(record: FileRecord): string {
+    const id = record.Id ?? record['id'];
+    return id == null ? 'unknown' : String(id);
+  }
+
   /**
    * Fetch all matching file records.
    * Uses autoFetch: true to paginate through all result pages automatically.
@@ -212,22 +226,28 @@ export class FileExport {
 
   /**
    * Download a single file record and write it to disk.
+   *
+   * Declared async so that every failure (including synchronous throws such as the
+   * size guard) becomes a rejected promise that Promise.allSettled can record,
+   * instead of escaping the batch loop and aborting the whole export.
    */
-
-  private downloadFile(
+  // eslint-disable-next-line @typescript-eslint/require-await
+  private async downloadFile(
     record: FileRecord,
     options: FileExportOptions,
     seenNames: Set<string>
-  ): { size: number } | null {
+  ): Promise<{ size: number } | null> {
     const config = this.getFileTypeConfig(options.fileType);
     const maxSize = options.maxFileSizeBytes ?? DEFAULT_MAX_FILE_SIZE_BYTES;
+    const recordId = FileExport.idOf(record);
 
     // Resolve name via config.nameField to handle nested paths like ContentDocument.Title
-    const rawName = this.resolveFieldPath(record, config.nameField) ?? record.id;
-    const baseName = this.sanitizeFileName(String(rawName));
+    const rawName = this.resolveFieldPath(record, config.nameField) ?? recordId;
+    // Fall back to the record ID if sanitization leaves nothing usable (e.g. a name of "..").
+    const baseName = this.sanitizeFileName(String(rawName)) || this.sanitizeFileName(recordId);
 
     // Deduplicate filenames by appending record ID as a suffix
-    const fileName = seenNames.has(baseName) ? `${baseName}_${record.id}` : baseName;
+    const fileName = seenNames.has(baseName) ? `${baseName}_${recordId}` : baseName;
     seenNames.add(fileName);
 
     const filePath = path.join(options.outputDir, fileName);
@@ -237,7 +257,7 @@ export class FileExport {
 
     // Check nullish — avoids String coercion of literal "null"
     if (rawContent == null || rawContent === '') {
-      this.logger.warn(`No file content for record ${record.id} (${fileName}), skipping`);
+      this.logger.warn(`No file content for record ${recordId} (${fileName}), skipping`);
       return null;
     }
 
@@ -288,11 +308,13 @@ export class FileExport {
    * Strips / and \ in addition to the standard forbidden set.
    */
   private sanitizeFileName(fileName: string): string {
-    return fileName
-      .replace(/[<>:"|?*\\/]/g, '_')
+    const sanitized = fileName
+      .replace(INVALID_FILENAME_CHARS, '_')
       .replace(/\.\./g, '_')
       .replace(/^\.+/, '_')
+      .trim()
       .substring(0, 255);
+    return WINDOWS_RESERVED_NAMES.test(sanitized) ? `_${sanitized}` : sanitized;
   }
 
   /**

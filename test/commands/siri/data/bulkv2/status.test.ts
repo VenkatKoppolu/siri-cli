@@ -1,121 +1,66 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment */
-/* eslint-disable @typescript-eslint/no-unsafe-call */
-/* eslint-disable @typescript-eslint/no-unsafe-member-access */
-/* eslint-disable @typescript-eslint/no-unsafe-argument */
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import { expect } from 'chai';
-import * as sinon from 'sinon';
-import { stubInterface } from '@salesforce/ts-sinon';
-import { Connection, Org } from '@salesforce/core';
-import BulkV2Status from '../../../../src/commands/siri/data/bulkv2/status.js';
-import { BulkV2 } from '../../../../src/utilities/bulkv2.js';
-import { JobInfo } from '../../../../src/types/bulkv2.js';
+import { SinonStub } from 'sinon';
+import { TestContext, MockTestOrgData } from '@salesforce/core/testSetup';
+import { stubSfCommandUx, stubSpinner } from '@salesforce/sf-plugins-core';
+import BulkV2Status from '../../../../../src/commands/siri/data/bulkv2/status.js';
+import { BulkV2 } from '../../../../../src/utilities/bulkv2.js';
+import { expectReject, mockJob } from '../../../../helpers/bulkv2.js';
 
-describe('siri:data:bulkv2:status', () => {
-  let connectionStub: sinon.SinonStubbedInstance<Connection>;
-  let bulkV2StatusStub: sinon.SinonStub;
+describe('siri data bulkv2 status', () => {
+  const $$ = new TestContext();
+  const testOrg = new MockTestOrgData();
+  let statusStub: SinonStub;
+  let uxStubs: ReturnType<typeof stubSfCommandUx>;
+  let spinnerStubs: ReturnType<typeof stubSpinner>;
 
-  const mockJobStatus: JobInfo = {
-    id: '750xx0000000049AAA',
-    operation: 'insert',
-    object: 'Account',
-    createdById: '005xx000001Sv1',
-    createdDate: new Date(),
-    systemModstamp: new Date(),
-    state: 'InProgress',
-    concurrencyMode: 'Parallel',
-    contentType: 'CSV',
-    apiVersion: 59,
-    contentUrl: '/services/data/v59.0/jobs/ingest/750xx0000000049AAA',
-    numberRecordsProcessed: 50,
-    numberRecordsFailed: 0,
-  };
+  const jobId = '750xx0000000049AAA';
+  const baseArgs = ['--target-org', testOrg.username, '--jobid', jobId];
 
-  beforeEach(() => {
-    connectionStub = stubInterface<Connection>(sinon);
-    connectionStub.accessToken = 'test-token';
-    connectionStub.instanceUrl = 'https://test.salesforce.com';
-    connectionStub.getApiVersion.returns('59.0');
-
-    sinon.stub(Org, 'create').resolves({
-      getConnection: () => connectionStub,
-    } as any);
-
-    bulkV2StatusStub = sinon.stub(BulkV2.prototype, 'status').resolves(mockJobStatus);
+  beforeEach(async () => {
+    await $$.stubAuths(testOrg);
+    uxStubs = stubSfCommandUx($$.SANDBOX);
+    spinnerStubs = stubSpinner($$.SANDBOX);
+    statusStub = $$.SANDBOX.stub(BulkV2.prototype, 'status').resolves(mockJob({ id: jobId, state: 'InProgress' }));
   });
 
   afterEach(() => {
-    sinon.restore();
+    $$.restore();
   });
 
-  it('should execute status command with jobid flag', async () => {
-    const cmd = new BulkV2Status([]);
-    sinon.stub(cmd.spinner, 'start');
-    sinon.stub(cmd.spinner, 'stop');
-    sinon.stub(cmd, 'log');
-    sinon.stub(cmd, 'styledHeader');
-    sinon.stub(cmd, 'styledObject');
+  it('returns the job status and renders a summary', async () => {
+    const result = await BulkV2Status.run(baseArgs);
 
-    const result = await (cmd as any).run([
-      '--jobid',
-      '750xx0000000049AAA',
-    ]);
-
-    expect(result.id).to.equal('750xx0000000049AAA');
+    expect(result.id).to.equal(jobId);
+    expect(result.state).to.equal('InProgress');
+    expect(uxStubs.styledHeader.calledOnce).to.be.true;
+    expect(uxStubs.styledObject.calledOnce).to.be.true;
   });
 
-  it('should require jobid flag', async () => {
-    const cmd = new BulkV2Status([]);
-    sinon.stub(cmd.spinner, 'start');
-    sinon.stub(cmd.spinner, 'stop');
+  it('calls BulkV2.status with the job ID and the default STATUS type', async () => {
+    await BulkV2Status.run(baseArgs);
 
-    try {
-      await (cmd as any).run([]);
-      expect.fail('Should require jobid');
-    } catch (err) {
-      expect((err as any).message).to.include('Required flag');
-    }
+    expect(statusStub.calledOnceWithExactly(jobId, 'STATUS')).to.be.true;
   });
 
-  it('should call BulkV2.status with correct jobid', async () => {
-    const cmd = new BulkV2Status([]);
-    sinon.stub(cmd.spinner, 'start');
-    sinon.stub(cmd.spinner, 'stop');
-    sinon.stub(cmd, 'log');
-    sinon.stub(cmd, 'styledHeader');
-    sinon.stub(cmd, 'styledObject');
+  it('upper-cases the --type flag', async () => {
+    await BulkV2Status.run([...baseArgs, '--type', 'query']);
 
-    const jobId = '750xx0000000049AAA';
-    await (cmd as any).run(['--jobid', jobId]);
-
-    const callArgs = bulkV2StatusStub.getCall(0).args;
-    expect(callArgs[0]).to.equal(jobId);
+    expect(statusStub.firstCall.args[1]).to.equal('QUERY');
   });
 
-  it('should display job status details', async () => {
-    const cmd = new BulkV2Status([]);
-    sinon.stub(cmd.spinner, 'start');
-    sinon.stub(cmd.spinner, 'stop');
-    sinon.stub(cmd, 'log');
-    const styledHeaderStub = sinon.stub(cmd, 'styledHeader');
-    sinon.stub(cmd, 'styledObject');
+  it('requires --jobid', async () => {
+    const err = await expectReject(() => BulkV2Status.run(['--target-org', testOrg.username]));
 
-    await (cmd as any).run(['--jobid', '750xx0000000049AAA']);
-
-    expect(styledHeaderStub.called).to.be.true;
+    expect(err.message).to.match(/Missing required flag/);
+    expect(statusStub.called).to.be.false;
   });
 
-  it('should stop spinner on error', async () => {
-    bulkV2StatusStub.rejects(new Error('Status Error'));
-    const cmd = new BulkV2Status([]);
-    sinon.stub(cmd.spinner, 'start');
-    const stopStub = sinon.stub(cmd.spinner, 'stop');
+  it('stops the spinner and rethrows when the status call fails', async () => {
+    statusStub.rejects(new Error('Status exploded'));
 
-    try {
-      await (cmd as any).run(['--jobid', '750xx0000000049AAA']);
-      expect.fail('Should have thrown error');
-    } catch (err) {
-      expect(stopStub.called).to.be.true;
-    }
+    const err = await expectReject(() => BulkV2Status.run(baseArgs));
+
+    expect(err.message).to.include('Status exploded');
+    expect(spinnerStubs.stop.called).to.be.true;
   });
 });

@@ -47,6 +47,5 @@ node_modules
 # os specific files
 .DS_Store
 .idea
-yarn.lock
 ASSESSMENT_REPORT.md
 TEST_SUITE_DOCUMENTATION.md

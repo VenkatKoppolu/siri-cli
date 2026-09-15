@@ -1,5 +1,5 @@
 import { SfCommand, Flags } from '@salesforce/sf-plugins-core';
-import { Messages, Org, SfError } from '@salesforce/core';
+import { Messages, SfError } from '@salesforce/core';
 import { BulkV2 } from '../../../../utilities/bulkv2.js';
 import { JobInfo } from '../../../../types/bulkv2.js';
 
@@ -19,6 +19,14 @@ export default class BulkV2Status extends SfCommand<BulkV2StatusResult> {
   public static readonly description = messages.getMessage('status.description');
   public static readonly examples = messages.getMessages('status.examples');
   public static readonly flags = {
+    'target-org': Flags.requiredOrg({
+      char: 'o',
+      summary: messages.getMessage('flags.target-org.summary'),
+    }),
+    'api-version': Flags.orgApiVersion({
+      char: 'a',
+      summary: messages.getMessage('flags.api-version.summary'),
+    }),
     jobid: Flags.string({
       char: 'i',
       summary: messages.getMessage('flags.jobid.summary'),
@@ -34,23 +42,19 @@ export default class BulkV2Status extends SfCommand<BulkV2StatusResult> {
     }),
   };
 
-  protected static requiresUsername = true;
-
   public async run(): Promise<BulkV2StatusResult> {
     const { flags } = await this.parse(BulkV2Status);
     this.spinner.start('Getting Status');
     try {
-      const org = await Org.create();
-
-      // Retrieve the connection
-      const connection = org.getConnection();
+      const connection = flags['target-org'].getConnection(flags['api-version']);
       const bulkv2 = new BulkV2(connection);
       const jobsummary: JobInfo = await bulkv2.status(flags.jobid, flags.type.toUpperCase());
       this.statusSummary(jobsummary);
-      this.spinner.stop();
       return jobsummary;
     } catch (err) {
       throw SfError.wrap(err);
+    } finally {
+      this.spinner.stop();
     }
   }
 

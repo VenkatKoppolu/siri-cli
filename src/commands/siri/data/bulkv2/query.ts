@@ -1,5 +1,5 @@
 import { SfCommand, Flags } from '@salesforce/sf-plugins-core';
-import { Messages, Org, SfError } from '@salesforce/core';
+import { Messages, SfError } from '@salesforce/core';
 import { BulkV2Input, JobInfo } from '../../../../types/bulkv2.js';
 import { BulkV2 } from '../../../../utilities/bulkv2.js';
 
@@ -11,11 +11,19 @@ const messages = Messages.loadMessages('siri', 'siri.data.bulkv2');
 export type BulkV2QueryResult = JobInfo;
 
 export default class BulkV2Query extends SfCommand<BulkV2QueryResult> {
- public static readonly summary = messages.getMessage('query.summary');
+  public static readonly summary = messages.getMessage('query.summary');
   public static readonly description = messages.getMessage('query.description');
   public static readonly examples = messages.getMessages('query.examples');
 
   public static readonly flags = {
+    'target-org': Flags.requiredOrg({
+      char: 'o',
+      summary: messages.getMessage('flags.target-org.summary'),
+    }),
+    'api-version': Flags.orgApiVersion({
+      char: 'a',
+      summary: messages.getMessage('flags.api-version.summary'),
+    }),
     sobjecttype: Flags.string({
       char: 's',
       summary: messages.getMessage('flags.sobjecttype.summary'),
@@ -49,34 +57,28 @@ export default class BulkV2Query extends SfCommand<BulkV2QueryResult> {
       required: false,
     }),
   };
-    protected static requiresUsername = true;
 
-    public async run(): Promise<BulkV2QueryResult> {
-      const { flags } = await this.parse(BulkV2Query);
-
-      // Start the spinner
-      this.spinner.start('BulkV2 Query');
-      try {
-        const org = await Org.create();
-
-        // Retrieve the connection
-        const connection = org.getConnection();
-        const bulkv2 = new BulkV2(connection);
-        const input: BulkV2Input = {
-          csvfile: flags.outputfile,
-          sobjecttype: flags.sobjecttype,
-          operation: 'query',
-          query: flags.query,
-          lineending: flags.lineending,
-          delimiter: flags.columndelimiter,
-        };
-        const response: JobInfo = await bulkv2.operate(input);
-        this.log(messages.getMessage('info.jobDetails', [response.id, response.id]));
-        this.spinner.stop();
-        return response;
-      } catch (err) {
-        this.spinner.stop();
-        throw SfError.wrap(err);
-      }
+  public async run(): Promise<BulkV2QueryResult> {
+    const { flags } = await this.parse(BulkV2Query);
+    this.spinner.start('BulkV2 Query');
+    try {
+      const connection = flags['target-org'].getConnection(flags['api-version']);
+      const bulkv2 = new BulkV2(connection);
+      const input: BulkV2Input = {
+        csvfile: flags.outputfile,
+        sobjecttype: flags.sobjecttype,
+        operation: 'query',
+        query: flags.query,
+        lineending: flags.lineending,
+        delimiter: flags.columndelimiter,
+      };
+      const response: JobInfo = await bulkv2.operate(input);
+      this.log(messages.getMessage('info.jobDetails', [response.id, response.id]));
+      return response;
+    } catch (err) {
+      throw SfError.wrap(err);
+    } finally {
+      this.spinner.stop();
     }
+  }
 }

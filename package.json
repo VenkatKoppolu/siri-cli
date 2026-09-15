@@ -4,8 +4,8 @@
   "version": "2.0.0",
   "dependencies": {
     "@oclif/core": "^4",
-    "@salesforce/core": "^7.2.0",
-    "@salesforce/sf-plugins-core": "^10.0.0",
+    "@salesforce/core": "^8.32.6",
+    "@salesforce/sf-plugins-core": "^12.2.28",
     "axios": "^1.15.0"
   },
   "devDependencies": {
@@ -17,6 +17,15 @@
     "oclif": "^4.8.1",
     "ts-node": "^10.9.2",
     "typescript": "^5.4.5"
+  },
+  "resolutions": {
+    "**/@typescript-eslint/typescript-estree/minimatch": "^9.0.7",
+    "**/eslint/js-yaml": "^4.3.2",
+    "**/mocha/serialize-javascript": "^7.0.5",
+    "**/gaxios/uuid": "^11.1.1",
+    "**/istanbul-lib-processinfo/uuid": "^11.1.1",
+    "**/@istanbuljs/load-nyc-config/js-yaml": "^3.15.2",
+    "**/@jsforce/jsforce-node/csv-parse": "^7.0.2"
   },
   "engines": {
     "node": ">=18.0.0"

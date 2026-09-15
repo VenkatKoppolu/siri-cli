@@ -1,126 +1,73 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment */
-/* eslint-disable @typescript-eslint/no-unsafe-call */
-/* eslint-disable @typescript-eslint/no-unsafe-member-access */
-/* eslint-disable @typescript-eslint/no-unsafe-argument */
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import { expect } from 'chai';
-import * as sinon from 'sinon';
-import { stubInterface } from '@salesforce/ts-sinon';
-import { Connection, Org } from '@salesforce/core';
-import BulkV2Delete from '../../../../src/commands/siri/data/bulkv2/delete.js';
-import { BulkV2 } from '../../../../src/utilities/bulkv2.js';
-import { JobInfo } from '../../../../src/types/bulkv2.js';
+import { SinonStub } from 'sinon';
+import { TestContext, MockTestOrgData } from '@salesforce/core/testSetup';
+import { stubSfCommandUx, stubSpinner } from '@salesforce/sf-plugins-core';
+import BulkV2Delete from '../../../../../src/commands/siri/data/bulkv2/delete.js';
+import { BulkV2 } from '../../../../../src/utilities/bulkv2.js';
+import { expectReject, mockJob } from '../../../../helpers/bulkv2.js';
 
-describe('siri:data:bulkv2:delete', () => {
-  let connectionStub: sinon.SinonStubbedInstance<Connection>;
-  let bulkV2OperateStub: sinon.SinonStub;
-  let checkFileSizeStub: sinon.SinonStub;
+describe('siri data bulkv2 delete', () => {
+  const $$ = new TestContext();
+  const testOrg = new MockTestOrgData();
+  let operateStub: SinonStub;
+  let checkFileSizeStub: SinonStub;
+  let cleanupStub: SinonStub;
+  let spinnerStubs: ReturnType<typeof stubSpinner>;
 
-  const mockJobResponse: JobInfo = {
-    id: '750xx0000000047AAA',
-    operation: 'delete',
-    object: 'Account',
-    createdById: '005xx000001Sv1',
-    createdDate: new Date(),
-    systemModstamp: new Date(),
-    state: 'UploadComplete',
-    concurrencyMode: 'Parallel',
-    contentType: 'CSV',
-    apiVersion: 59,
-    contentUrl: '/services/data/v59.0/jobs/ingest/750xx0000000047AAA',
-    numberRecordsProcessed: 25,
-    numberRecordsFailed: 0,
-  };
+  const baseArgs = ['--target-org', testOrg.username, '--sobjecttype', 'Account', '--csvfile', 'delete.csv'];
 
-  beforeEach(() => {
-    connectionStub = stubInterface<Connection>(sinon);
-    connectionStub.accessToken = 'test-token';
-    connectionStub.instanceUrl = 'https://test.salesforce.com';
-    connectionStub.getApiVersion.returns('59.0');
-
-    sinon.stub(Org, 'create').resolves({
-      getConnection: () => connectionStub,
-    } as any);
-
-    bulkV2OperateStub = sinon.stub(BulkV2.prototype, 'operate').resolves(mockJobResponse);
-    checkFileSizeStub = sinon.stub(BulkV2.prototype, 'checkFileSizeAndAct').returns(['delete.csv']);
+  beforeEach(async () => {
+    await $$.stubAuths(testOrg);
+    stubSfCommandUx($$.SANDBOX);
+    spinnerStubs = stubSpinner($$.SANDBOX);
+    operateStub = $$.SANDBOX.stub(BulkV2.prototype, 'operate').resolves(mockJob({ operation: 'delete' }));
+    checkFileSizeStub = $$.SANDBOX.stub(BulkV2.prototype, 'checkFileSizeAndAct').resolves(['delete.csv']);
+    cleanupStub = $$.SANDBOX.stub(BulkV2.prototype, 'cleanupTempFiles');
   });
 
   afterEach(() => {
-    sinon.restore();
+    $$.restore();
   });
 
-  it('should execute delete command with required flags', async () => {
-    const cmd = new BulkV2Delete([]);
-    sinon.stub(cmd.spinner, 'start');
-    sinon.stub(cmd.spinner, 'stop');
-    sinon.stub(cmd, 'log');
+  it('runs a soft delete by default and returns one job per file', async () => {
+    const result = await BulkV2Delete.run(baseArgs);
 
-    const result = await (cmd as any).run(['--sobjecttype', 'Account', '--csvfile', 'delete.csv']);
-
-    expect(Array.isArray(result)).to.be.true;
-    expect(result[0].operation).to.equal('delete');
+    expect(result).to.have.length(1);
+    expect(result[0].id).to.equal('750xx0000000044AAA');
+    expect(operateStub.firstCall.args[0]).to.include({ operation: 'delete', csvfile: 'delete.csv' });
   });
 
-  it('should use hard operation when hard flag is set', async () => {
-    const cmd = new BulkV2Delete([]);
-    sinon.stub(cmd.spinner, 'start');
-    sinon.stub(cmd.spinner, 'stop');
-    sinon.stub(cmd, 'log');
+  it('uses hardDelete when --hard is set', async () => {
+    await BulkV2Delete.run([...baseArgs, '--hard']);
 
-    await (cmd as any).run(['--sobjecttype', 'Account', '--csvfile', 'delete.csv', '--hard']);
-
-    const callArgs = bulkV2OperateStub.getCall(0).args[0];
-    expect(callArgs.operation).to.equal('hard');
+    expect(operateStub.firstCall.args[0]).to.include({ operation: 'hardDelete' });
   });
 
-  it('should use delete operation by default', async () => {
-    const cmd = new BulkV2Delete([]);
-    sinon.stub(cmd.spinner, 'start');
-    sinon.stub(cmd.spinner, 'stop');
-    sinon.stub(cmd, 'log');
+  it('splits the CSV first and runs one job per chunk', async () => {
+    checkFileSizeStub.resolves(['/tmp/chunk-0.csv', '/tmp/chunk-1.csv']);
 
-    await (cmd as any).run(['--sobjecttype', 'Account', '--csvfile', 'delete.csv']);
+    const result = await BulkV2Delete.run(baseArgs);
 
-    const callArgs = bulkV2OperateStub.getCall(0).args[0];
-    expect(callArgs.operation).to.equal('delete');
+    expect(checkFileSizeStub.calledOnceWithExactly('delete.csv')).to.be.true;
+    expect(operateStub.callCount).to.equal(2);
+    expect(operateStub.secondCall.args[0]).to.include({ csvfile: '/tmp/chunk-1.csv' });
+    expect(result).to.have.length(2);
   });
 
-  it('should check file size before deletion', async () => {
-    const cmd = new BulkV2Delete([]);
-    sinon.stub(cmd.spinner, 'start');
-    sinon.stub(cmd.spinner, 'stop');
-    sinon.stub(cmd, 'log');
+  it('always removes temp chunks and stops the spinner, even on failure', async () => {
+    operateStub.rejects(new Error('Delete exploded'));
 
-    await (cmd as any).run(['--sobjecttype', 'Account', '--csvfile', 'delete.csv']);
+    const err = await expectReject(() => BulkV2Delete.run(baseArgs));
 
-    expect(checkFileSizeStub.calledOnce).to.be.true;
+    expect(err.message).to.include('Delete exploded');
+    expect(cleanupStub.calledOnce).to.be.true;
+    expect(spinnerStubs.stop.called).to.be.true;
   });
 
-  it('should return array of job responses', async () => {
-    bulkV2OperateStub.resolves(mockJobResponse);
-    const cmd = new BulkV2Delete([]);
-    sinon.stub(cmd.spinner, 'start');
-    sinon.stub(cmd.spinner, 'stop');
-    sinon.stub(cmd, 'log');
+  it('requires --sobjecttype and --csvfile', async () => {
+    const err = await expectReject(() => BulkV2Delete.run(['--target-org', testOrg.username]));
 
-    const result = await (cmd as any).run(['--sobjecttype', 'Account', '--csvfile', 'delete.csv']);
-
-    expect(Array.isArray(result)).to.be.true;
-    expect(result.length).to.be.greaterThan(0);
-  });
-
-  it('should stop spinner on error', async () => {
-    bulkV2OperateStub.rejects(new Error('API Error'));
-    const cmd = new BulkV2Delete([]);
-    sinon.stub(cmd.spinner, 'start');
-    const stopStub = sinon.stub(cmd.spinner, 'stop');
-
-    try {
-      await (cmd as any).run(['--sobjecttype', 'Account', '--csvfile', 'delete.csv']);
-      expect.fail('Should have thrown error');
-    } catch (err) {
-      expect(stopStub.called).to.be.true;
-    }
+    expect(err.message).to.match(/Missing required flag/);
+    expect(operateStub.called).to.be.false;
   });
 });

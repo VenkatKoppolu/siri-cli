@@ -1,248 +1,152 @@
-/*
- * Copyright (c) 2023, salesforce.com, inc.
- * All rights reserved.
- * Licensed under the BSD 3-Clause license.
- * For full license text, see LICENSE.txt file in the repo root or https://opensource.org/licenses/BSD-3-Clause
- */
-/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-explicit-any */
-
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { expect } from 'chai';
-import sinon from 'sinon';
-import { stubInterface } from '@salesforce/ts-sinon';
-import { Connection, Org } from '@salesforce/core';
-import SiriDataExportFiles from '../../../src/commands/siri/data/export/files.js';
+import { SinonStub } from 'sinon';
+import { Connection } from '@salesforce/core';
+import { TestContext, MockTestOrgData } from '@salesforce/core/testSetup';
+import { stubSfCommandUx, stubSpinner } from '@salesforce/sf-plugins-core';
+import SiriDataExportFiles from '../../../../../src/commands/siri/data/export/files.js';
+import { expectReject } from '../../../../helpers/bulkv2.js';
 
-describe('siri:data:export:files', () => {
-  let sandbox: sinon.SinonSandbox;
-  let orgStub: sinon.SinonStubbedInstance<Org>;
-  let connectionStub: sinon.SinonStubbedInstance<Connection>;
-  const testDir = path.join(__dirname, '../../.export-cmd-test');
+type QueryResult = Awaited<ReturnType<Connection['query']>>;
 
-  beforeEach(() => {
-    sandbox = sinon.createSandbox();
-    connectionStub = stubInterface<Connection>(sandbox);
-    orgStub = stubInterface<Org>(sandbox);
-    orgStub.getConnection.returns(connectionStub);
+const asQueryResult = (records: unknown[]): QueryResult =>
+  ({ done: true, totalSize: records.length, records } as unknown as QueryResult);
 
-    // Create test directory
-    if (!fs.existsSync(testDir)) {
-      fs.mkdirSync(testDir, { recursive: true });
-    }
+// Only SOQL against the file objects belongs to the export; org resolution may run
+// its own queries through the same stubbed Connection.query.
+const EXPORT_SOQL = /FROM (Attachment|ContentVersion|Document)\b/i;
+
+describe('siri data export files', () => {
+  const $$ = new TestContext();
+  const testOrg = new MockTestOrgData();
+  let queryStub: SinonStub;
+  let uxStubs: ReturnType<typeof stubSfCommandUx>;
+  let outputDir: string;
+  let exportRecords: unknown[];
+
+  const attachmentRecords = [
+    { Id: '00P000000000001AAA', Name: 'file1.txt', Body: Buffer.from('test content').toString('base64') },
+  ];
+
+  const exportQueryCount = (): number => queryStub.getCalls().filter((c) => EXPORT_SOQL.test(String(c.args[0]))).length;
+
+  const argsFor = (...extra: string[]): string[] => [
+    '--target-org',
+    testOrg.username,
+    '--filetype',
+    'attachment',
+    '--query',
+    'SELECT Id, Name, Body FROM Attachment',
+    '--output-dir',
+    outputDir,
+    ...extra,
+  ];
+
+  beforeEach(async () => {
+    // Earlier tests (and SfCommand's own error handler) may have set a failure exit code.
+    process.exitCode = undefined;
+    exportRecords = attachmentRecords;
+    await $$.stubAuths(testOrg);
+    uxStubs = stubSfCommandUx($$.SANDBOX);
+    stubSpinner($$.SANDBOX);
+    const fakeQuery = (soql: unknown): Promise<QueryResult> =>
+      Promise.resolve(EXPORT_SOQL.test(String(soql)) ? asQueryResult(exportRecords) : asQueryResult([]));
+    queryStub = $$.SANDBOX.stub(Connection.prototype, 'query').callsFake(fakeQuery as unknown as Connection['query']);
+    outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'siri-export-cmd-'));
   });
 
   afterEach(() => {
-    sandbox.restore();
-    // Clean up test files
-    if (fs.existsSync(testDir)) {
-      fs.rmSync(testDir, { recursive: true });
-    }
+    $$.restore();
+    fs.rmSync(outputDir, { recursive: true, force: true });
+    process.exitCode = undefined;
   });
 
-  it('should execute export files command with attachment type', async () => {
-    const cmd = new SiriDataExportFiles([]);
-    sinon.stub(cmd, 'spinner').get(() => ({
-      start: sinon.stub(),
-      stop: sinon.stub(),
-      status: '',
-    }));
-    sinon.stub(cmd, 'log');
+  it('exports attachments into the output directory', async () => {
+    await SiriDataExportFiles.run(argsFor());
 
-    sinon.stub(Org, 'create').resolves(orgStub);
+    expect(exportQueryCount()).to.equal(1);
+    expect(fs.readFileSync(path.join(outputDir, 'file1.txt'), 'utf8')).to.equal('test content');
+    const logged = uxStubs.log.getCalls().map((c) => String(c.args[0]));
+    expect(logged.some((l) => l.includes('File Export Summary'))).to.be.true;
+    expect(process.exitCode).to.be.undefined;
+  });
 
-    const mockRecords = [
-      { id: '001', name: 'file1.txt', body: Buffer.from('test content').toString('base64') },
+  it('logs the result as JSON when --json is set', async () => {
+    await SiriDataExportFiles.run(argsFor('--json'));
+
+    const logged = uxStubs.log.getCalls().map((c) => String(c.args[0]));
+    const jsonLine = logged.find((l) => l.includes('filesExported'));
+    expect(jsonLine).to.exist;
+    expect(JSON.parse(jsonLine ?? '{}')).to.include({ success: true, filesExported: 1, filesFailed: 0 });
+  });
+
+  it('supports the contentdocument file type with nested title resolution', async () => {
+    exportRecords = [
+      {
+        Id: '068000000000001AAA',
+        ContentDocument: { Title: 'doc.pdf' },
+        VersionData: Buffer.from('pdf data').toString('base64'),
+      },
     ];
-    (connectionStub.query as sinon.SinonStub).resolves({ records: mockRecords });
 
-    const result = await (cmd as any).run([
+    await SiriDataExportFiles.run([
       '--target-org',
-      'myorg',
-      '--filetype',
-      'attachment',
-      '--query',
-      'SELECT Id, Name, Body FROM Attachment',
-      '--output-dir',
-      testDir,
-    ]);
-
-    expect(result).to.be.undefined;
-  });
-
-  it('should require filetype flag', async () => {
-    const cmd = new SiriDataExportFiles([]);
-    sinon.stub(cmd, 'spinner').get(() => ({
-      start: sinon.stub(),
-      stop: sinon.stub(),
-      status: '',
-    }));
-
-    sinon.stub(Org, 'create').resolves(orgStub);
-
-    try {
-      await (cmd as any).run([
-        '--target-org',
-        'myorg',
-        '--query',
-        'SELECT Id, Name, Body FROM Attachment',
-        '--output-dir',
-        testDir,
-      ]);
-      expect.fail('Should have thrown error');
-    } catch (err) {
-      expect((err as any).message).to.include('Required flag');
-    }
-  });
-
-  it('should require query flag', async () => {
-    const cmd = new SiriDataExportFiles([]);
-    sinon.stub(cmd, 'spinner').get(() => ({
-      start: sinon.stub(),
-      stop: sinon.stub(),
-      status: '',
-    }));
-
-    sinon.stub(Org, 'create').resolves(orgStub);
-
-    try {
-      await (cmd as any).run([
-        '--target-org',
-        'myorg',
-        '--filetype',
-        'attachment',
-        '--output-dir',
-        testDir,
-      ]);
-      expect.fail('Should have thrown error');
-    } catch (err) {
-      expect((err as any).message).to.include('Required flag');
-    }
-  });
-
-  it('should require output-dir flag', async () => {
-    const cmd = new SiriDataExportFiles([]);
-    sinon.stub(cmd, 'spinner').get(() => ({
-      start: sinon.stub(),
-      stop: sinon.stub(),
-      status: '',
-    }));
-
-    sinon.stub(Org, 'create').resolves(orgStub);
-
-    try {
-      await (cmd as any).run([
-        '--target-org',
-        'myorg',
-        '--filetype',
-        'attachment',
-        '--query',
-        'SELECT Id, Name, Body FROM Attachment',
-      ]);
-      expect.fail('Should have thrown error');
-    } catch (err) {
-      expect((err as any).message).to.include('Required flag');
-    }
-  });
-
-  it('should output JSON format when json flag is set', async () => {
-    const cmd = new SiriDataExportFiles([]);
-    const logStub = sinon.stub();
-    const spinnerStub = {
-      start: sinon.stub(),
-      stop: sinon.stub(),
-      status: '',
-    };
-    sinon.stub(cmd, 'spinner').get(() => spinnerStub);
-    sinon.stub(cmd, 'log').callsFake(logStub);
-
-    sinon.stub(Org, 'create').resolves(orgStub);
-
-    const mockRecords = [{ id: '001', name: 'file1.txt', body: Buffer.from('test').toString('base64') }];
-    (connectionStub.query as sinon.SinonStub).resolves({ records: mockRecords });
-
-    await (cmd as any).run([
-      '--target-org',
-      'myorg',
-      '--filetype',
-      'attachment',
-      '--query',
-      'SELECT Id, Name, Body FROM Attachment',
-      '--output-dir',
-      testDir,
-      '--json',
-    ]);
-
-    const jsonCall = logStub.getCalls().find((call) => {
-      const arg = call.firstArg;
-      return typeof arg === 'string' && arg.includes('filesExported');
-    });
-
-    expect(jsonCall).to.exist;
-  });
-
-  it('should format output with file export summary', async () => {
-    const cmd = new SiriDataExportFiles([]);
-    const logStub = sinon.stub();
-    const spinnerStub = {
-      start: sinon.stub(),
-      stop: sinon.stub(),
-      status: '',
-    };
-    sinon.stub(cmd, 'spinner').get(() => spinnerStub);
-    sinon.stub(cmd, 'log').callsFake(logStub);
-
-    sinon.stub(Org, 'create').resolves(orgStub);
-
-    const mockRecords = [{ id: '001', name: 'file1.txt', body: Buffer.from('test content').toString('base64') }];
-    (connectionStub.query as sinon.SinonStub).resolves({ records: mockRecords });
-
-    await (cmd as any).run([
-      '--target-org',
-      'myorg',
-      '--filetype',
-      'attachment',
-      '--query',
-      'SELECT Id, Name, Body FROM Attachment',
-      '--output-dir',
-      testDir,
-    ]);
-
-    const summaryCall = logStub.getCalls().find((call) => {
-      const arg = call.firstArg;
-      return typeof arg === 'string' && arg.includes('File Export Summary');
-    });
-
-    expect(summaryCall).to.exist;
-  });
-
-  it('should support contentdocument file type', async () => {
-    const cmd = new SiriDataExportFiles([]);
-    sinon.stub(cmd, 'spinner').get(() => ({
-      start: sinon.stub(),
-      stop: sinon.stub(),
-      status: '',
-    }));
-    sinon.stub(cmd, 'log');
-
-    sinon.stub(Org, 'create').resolves(orgStub);
-
-    const mockRecords = [
-      { id: '069xx', 'ContentDocument.Title': 'doc.pdf', versionData: Buffer.from('pdf data').toString('base64') },
-    ];
-    (connectionStub.query as sinon.SinonStub).resolves({ records: mockRecords });
-
-    await (cmd as any).run([
-      '--target-org',
-      'myorg',
+      testOrg.username,
       '--filetype',
       'contentdocument',
       '--query',
       'SELECT Id, ContentDocument.Title, VersionData FROM ContentVersion',
       '--output-dir',
-      testDir,
+      outputDir,
     ]);
 
-    expect((connectionStub.query as sinon.SinonStub).called).to.be.true;
+    expect(fs.readFileSync(path.join(outputDir, 'doc.pdf'), 'utf8')).to.equal('pdf data');
+  });
+
+  it('sets a non-zero exit code when some files fail', async () => {
+    exportRecords = [
+      ...attachmentRecords,
+      { Id: '00P000000000002AAA', Name: 'huge.bin', Body: Buffer.alloc(64).toString('base64') },
+    ];
+
+    await SiriDataExportFiles.run(argsFor('--max-file-size', '32'));
+
+    expect(process.exitCode).to.equal(1);
+    const logged = uxStubs.log.getCalls().map((c) => String(c.args[0]));
+    expect(logged.some((l) => l.includes('huge.bin') && l.includes('exceeds max allowed size'))).to.be.true;
+  });
+
+  it('rejects an unsupported --filetype value', async () => {
+    const err = await expectReject(() =>
+      SiriDataExportFiles.run([
+        '--target-org',
+        testOrg.username,
+        '--filetype',
+        'spreadsheet',
+        '--query',
+        'SELECT Id FROM Attachment',
+        '--output-dir',
+        outputDir,
+      ])
+    );
+
+    expect(err.message).to.match(/Expected --filetype=spreadsheet to be one of/);
+    expect(exportQueryCount()).to.equal(0);
+  });
+
+  it('requires --filetype, --query and --output-dir', async () => {
+    const cases = [
+      ['--target-org', testOrg.username, '--query', 'SELECT Id FROM Attachment', '--output-dir', outputDir],
+      ['--target-org', testOrg.username, '--filetype', 'attachment', '--output-dir', outputDir],
+      ['--target-org', testOrg.username, '--filetype', 'attachment', '--query', 'SELECT Id FROM Attachment'],
+    ];
+    for (const args of cases) {
+      // eslint-disable-next-line no-await-in-loop
+      const err = await expectReject(() => SiriDataExportFiles.run(args));
+      expect(err.message).to.match(/Missing required flag/);
+    }
+    expect(exportQueryCount()).to.equal(0);
   });
 });

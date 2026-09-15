@@ -18,11 +18,11 @@ export default class BulkV2Delete extends SfCommand<BulkV2DeleteResult[]> {
   public static readonly flags = {
     'target-org': Flags.requiredOrg({
       char: 'o',
-      summary: 'Target org to run the command against',
+      summary: messages.getMessage('flags.target-org.summary'),
     }),
-    'api-version': Flags.string({
+    'api-version': Flags.orgApiVersion({
       char: 'a',
-      summary: 'API version to use',
+      summary: messages.getMessage('flags.api-version.summary'),
     }),
     sobjecttype: Flags.string({
       char: 's',
@@ -67,15 +67,8 @@ export default class BulkV2Delete extends SfCommand<BulkV2DeleteResult[]> {
     const responses: JobInfo[] = [];
     let bulkv2: BulkV2 | undefined;
     try {
-      // Get the Salesforce org and Connection
-      const org = flags['target-org'];
-      const conn = org.getConnection();
-
-      // Set Api Version if specified
-      const apiVersion = flags['api-version'];
-      if (apiVersion) {
-        conn.setApiVersion(apiVersion);
-      }
+      // Get the Salesforce org and Connection (validated --api-version applied if given)
+      const conn = flags['target-org'].getConnection(flags['api-version']);
       bulkv2 = new BulkV2(conn);
       const files: string[] = await bulkv2.checkFileSizeAndAct(flags.csvfile);
 

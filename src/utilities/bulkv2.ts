@@ -4,7 +4,7 @@ import * as util from 'node:util';
 import * as readline from 'node:readline';
 import path, { resolve as pathResolve } from 'node:path';
 import { Connection, Logger, Messages, SfError } from '@salesforce/core';
-import axios, { AxiosRequestConfig, AxiosResponse } from 'axios';
+import axios, { AxiosError, AxiosRequestConfig, AxiosResponse } from 'axios';
 import { BulkV2Input, JobInfo } from '../types/bulkv2.js';
 import { Common } from './common.js';
 
@@ -18,6 +18,15 @@ const MAX_CHUNK_MB = 100;
 const MAX_CHUNK_BYTES = MAX_CHUNK_MB * 1024 * 1024;
 
 const logger = (await Logger.child('Org')).getRawLogger();
+
+// Salesforce record IDs are 15 or 18 alphanumeric characters. Job IDs are
+// interpolated into request paths, so anything else is rejected up front.
+const SALESFORCE_ID_REGEX = /^[a-zA-Z0-9]{15}([a-zA-Z0-9]{3})?$/;
+
+// Temp chunk files are created inside a private directory (0700) with owner-only
+// permissions, so CSV data staged for upload is never readable by other local users.
+const TEMP_DIR_PREFIX = 'siri-bulkv2-';
+const TEMP_FILE_MODE = 0o600;
 
 enum ENDPOINT {
   QUERY = '%s/services/data/v%s/jobs/query',
@@ -40,6 +49,8 @@ export class BulkV2 {
   private query: boolean = false;
   // Temp chunk files created by checkFileSizeAndAct; removed by cleanupTempFiles.
   private tempFiles: string[] = [];
+  // Private (0700) directory holding the temp chunk files; removed by cleanupTempFiles.
+  private tempDir: string | undefined;
   // Max bytes per split chunk. Defaults to the API-safe cap; overridable for tests.
   private maxChunkBytes: number = MAX_CHUNK_BYTES;
 
@@ -99,6 +110,7 @@ export class BulkV2 {
    */
   private static toSfError(err: unknown, context: string): SfError {
     if (axios.isAxiosError(err)) {
+      BulkV2.redactAxiosError(err);
       const status = err.response?.status;
       const body: unknown = err.response?.data;
       const detail =
@@ -119,6 +131,45 @@ export class BulkV2 {
     const sfErr = new SfError(`${context} failed: ${base.message}`, 'BulkApiError');
     sfErr.cause = base;
     return sfErr;
+  }
+
+  /**
+   * Strip the access token and raw request objects from an axios error before it is
+   * attached as a cause. Axios errors carry the full request config (including the
+   * Authorization header) and the underlying ClientRequest, both of which would leak
+   * the bearer token into debug logs, --json error output or crash reports.
+   */
+  private static redactAxiosError(err: AxiosError): void {
+    const configs = [err.config, err.response?.config].filter((c): c is NonNullable<typeof c> => c !== undefined);
+    for (const config of configs) {
+      if (config.headers) {
+        // AxiosHeaders exposes delete(); a plain object needs the key removed directly.
+        const headers = config.headers as unknown as Record<string, unknown> & { delete?: (k: string) => void };
+        if (typeof headers.delete === 'function') {
+          headers.delete('Authorization');
+          headers.delete('authorization');
+        } else {
+          delete headers['Authorization'];
+          delete headers['authorization'];
+        }
+      }
+    }
+    // The raw ClientRequest holds the serialized header block, token included.
+    /* eslint-disable no-param-reassign */
+    err.request = undefined;
+    if (err.response) {
+      err.response.request = undefined;
+    }
+    /* eslint-enable no-param-reassign */
+  }
+
+  /**
+   * Validate a user-supplied Salesforce job ID before it is placed in a URL path.
+   */
+  private static assertValidJobId(jobid: string): void {
+    if (!SALESFORCE_ID_REGEX.test(jobid)) {
+      throw new SfError(`Invalid job ID: ${jobid}. Expected a 15 or 18 character Salesforce ID.`, 'InvalidJobId');
+    }
   }
 
   /**
@@ -148,12 +199,21 @@ export class BulkV2 {
     let chunkBytes = 0;
     let chunkIndex = 0;
 
+    // mkdtemp creates a uniquely named directory with mode 0700, so chunk files are
+    // neither predictable nor readable by other users sharing the temp directory.
+    this.tempDir ??= await fs.promises.mkdtemp(path.join(os.tmpdir(), TEMP_DIR_PREFIX));
+    const tempDir = this.tempDir;
+
     const flushChunk = async (): Promise<void> => {
       if (chunkLines.length === 0) return;
-      const tempPath = path.join(os.tmpdir(), `bulkv2-split-${process.pid}-${Date.now()}-${chunkIndex}.csv`);
+      const tempPath = path.join(tempDir, `chunk-${chunkIndex}.csv`);
       chunkIndex++;
       this.tempFiles.push(tempPath);
-      await fs.promises.writeFile(tempPath, `${header ?? ''}\n${chunkLines.join('\n')}\n`, { encoding: 'utf8' });
+      await fs.promises.writeFile(tempPath, `${header ?? ''}\n${chunkLines.join('\n')}\n`, {
+        encoding: 'utf8',
+        mode: TEMP_FILE_MODE,
+        flag: 'wx',
+      });
       chunkLines = [];
       chunkBytes = 0;
     };
@@ -204,6 +264,14 @@ export class BulkV2 {
       }
     }
     this.tempFiles = [];
+    if (this.tempDir) {
+      try {
+        fs.rmSync(this.tempDir, { recursive: true, force: true });
+      } catch {
+        // Best-effort cleanup — ignore removal errors.
+      }
+      this.tempDir = undefined;
+    }
   }
 
   public async operate(input: BulkV2Input): Promise<JobInfo> {
@@ -234,17 +302,15 @@ export class BulkV2 {
     try {
       const config: AxiosRequestConfig = this.generateConfig('text/csv');
       config.responseType = 'stream';
-      const response = await axios.get<NodeJS.ReadableStream>(endpoint + '?locator=' + locator, {
+      // The locator comes from a response header; encode it so it can only ever be a query value.
+      const response = await axios.get<NodeJS.ReadableStream>(`${endpoint}?locator=${encodeURIComponent(locator)}`, {
         ...config,
         responseType: 'stream',
       });
       await BulkV2.fastFileWrite(file, response.data);
       return response;
     } catch (err) {
-      throw new SfError(
-        `Failed to fetch more results: ${err instanceof Error ? err.message : 'Unknown error'}`,
-        'FetchResultsError'
-      );
+      throw BulkV2.toSfError(err, 'Fetching more results');
     }
   }
 
@@ -260,31 +326,25 @@ export class BulkV2 {
     const config: AxiosRequestConfig = this.generateConfig('application/json');
     config.responseType = 'stream';
 
-    return new Promise<boolean>((resolve, reject) => {
-      // eslint-disable-next-line @typescript-eslint/no-floating-promises
-      axios.get<NodeJS.ReadableStream>(endpoint, config).then(
-        (response: AxiosResponse<NodeJS.ReadableStream>) => {
-          this.processResultsRecursive(file, response, endpoint)
-            .then((success) => resolve(success))
-            .catch((err) => reject(err));
-        },
-        (err) => {
-          reject(
-            new SfError(
-              `Failed to fetch results: ${err instanceof Error ? err.message : 'Unknown error'}`,
-              'FetchError'
-            )
-          );
-        }
-      );
-    });
+    let response: AxiosResponse<NodeJS.ReadableStream>;
+    try {
+      response = await axios.get<NodeJS.ReadableStream>(endpoint, config);
+    } catch (err) {
+      throw BulkV2.toSfError(err, 'Fetching results');
+    }
+    return this.processResultsRecursive(file, response, endpoint);
   }
 
   public async status(jobid: string, type: string): Promise<JobInfo> {
     this.query = type.includes('QUERY');
     const endpoint: string = this.generateEndpoint(this.query ? 'QUERY_STATUS' : 'STATUS', jobid);
     const config: AxiosRequestConfig = this.generateConfig('application/json');
-    const response: AxiosResponse<JobInfo> = await axios.get<JobInfo>(endpoint, config);
+    let response: AxiosResponse<JobInfo>;
+    try {
+      response = await axios.get<JobInfo>(endpoint, config);
+    } catch (err) {
+      throw BulkV2.toSfError(err, 'Fetching job status');
+    }
     if (response?.status !== 200) {
       response.data.errorMessage = (response?.statusText ?? '') + (response.data.errorMessage ?? '');
     }
@@ -400,8 +460,11 @@ export class BulkV2 {
     if (!instanceUrl) {
       throw new SfError('No instance URL available', 'NoInstanceUrl');
     }
+    if (jobid !== '') {
+      BulkV2.assertValidJobId(jobid);
+    }
 
-    const baseParams = [instanceUrl, apiVersion, jobid];
+    const baseParams = [instanceUrl, apiVersion, encodeURIComponent(jobid)];
     let endpoint: string;
 
     switch (operation) {

@@ -1,5 +1,5 @@
 import { SfCommand, Flags } from '@salesforce/sf-plugins-core';
-import { Messages, Org, SfError } from '@salesforce/core';
+import { Messages, SfError } from '@salesforce/core';
 import { BulkV2 } from '../../../../utilities/bulkv2.js';
 
 // Initialize Messages with the current plugin directory
@@ -14,6 +14,14 @@ export default class BulkV2Results extends SfCommand<void> {
   public static readonly examples = messages.getMessages('results.examples');
 
   public static readonly flags = {
+    'target-org': Flags.requiredOrg({
+      char: 'o',
+      summary: messages.getMessage('flags.target-org.summary'),
+    }),
+    'api-version': Flags.orgApiVersion({
+      char: 'a',
+      summary: messages.getMessage('flags.api-version.summary'),
+    }),
     jobid: Flags.string({
       char: 'i',
       summary: messages.getMessage('flags.jobid.summary'),
@@ -35,25 +43,20 @@ export default class BulkV2Results extends SfCommand<void> {
     }),
   };
 
-  protected static requiresUsername = true;
-
   public async run(): Promise<void> {
     const { flags } = await this.parse(BulkV2Results);
     this.spinner.start('Fetching Results');
     try {
-      const org = await Org.create();
-
-      // Retrieve the connection
-      const connection = org.getConnection();
+      const connection = flags['target-org'].getConnection(flags['api-version']);
       const bulkv2 = new BulkV2(connection);
-      const result: boolean = await bulkv2.results(flags.jobid, flags.type?.toUpperCase(), flags.outputfile);
+      const result: boolean = await bulkv2.results(flags.jobid, flags.type.toUpperCase(), flags.outputfile);
       if (result) {
         this.log(`Results written to file ${flags.outputfile}`);
       }
-      this.spinner.stop();
     } catch (err) {
-      this.spinner.stop();
       throw SfError.wrap(err);
+    } finally {
+      this.spinner.stop();
     }
   }
 }

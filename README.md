@@ -16,12 +16,12 @@ A production-grade Salesforce CLI plugin for efficient bulk data operations usin
 - **Bulk Query** - Execute SOQL queries with result streaming to CSV
 - **Job Status Monitoring** - Track real-time progress of bulk operations
 - **Result Retrieval** - Download success, failed, or unprocessed records
-- **Smart File Handling** - Automatic splitting of large CSV files (>20MB) for optimal performance
+- **Smart File Handling** - Automatic splitting of large CSV files (>100MB) so no upload exceeds the Bulk API limit
 
 ### File Export
 - **Multi-Source Export** - Export files from Attachments, ContentDocuments, Documents, or custom objects
 - **Flexible Filtering** - Use SOQL queries to select which files to export
-- **Intelligent API Selection** - Auto-detects Bulk API vs Standard API based on volume
+- **Concurrency Control** - Tune parallel downloads and cap the size of individual files
 - **Cross-Platform** - Works on Windows, macOS, and Linux
 - **Automatic Directory Creation** - Output directory created if it doesn't exist
 - **Base64 Handling** - Automatically decodes base64-encoded file content
@@ -46,7 +46,7 @@ sf plugins install siri@1.0.0
 ### Insert Records
 
 ```bash
-sf siri data bulkv2 insert --sobjecttype Account --csvfile accounts.csv --targetusername myorg@example.com
+sf siri data bulkv2 insert --sobjecttype Account --csvfile accounts.csv --target-org myorg@example.com
 ```
 
 ### Query Records
@@ -56,13 +56,13 @@ sf siri data bulkv2 query \
   --sobjecttype Account \
   --query "SELECT Id, Name FROM Account WHERE Active__c = true" \
   --outputfile results.csv \
-  --targetusername myorg@example.com
+  --target-org myorg@example.com
 ```
 
 ### Check Job Status
 
 ```bash
-sf siri data bulkv2 status --jobid 750xx0000000044AAA --targetusername myorg@example.com
+sf siri data bulkv2 status --jobid 750xx0000000044AAA --target-org myorg@example.com
 ```
 
 ### Retrieve Results
@@ -72,7 +72,7 @@ sf siri data bulkv2 results \
   --jobid 750xx0000000044AAA \
   --type success \
   --outputfile success_records.csv \
-  --targetusername myorg@example.com
+  --target-org myorg@example.com
 ```
 
 ## Development
@@ -135,16 +135,20 @@ yarn prepack
 │   │   ├── query.ts
 │   │   ├── status.ts
 │   │   └── results.ts
+│   ├── commands/siri/data/export/    # File export command
+│   │   └── files.ts
 │   ├── utilities/
 │   │   ├── bulkv2.ts                 # Core Salesforce Bulk V2 API client
+│   │   ├── fileexport.ts             # Attachment / ContentVersion / Document export
 │   │   └── common.ts                 # Shared utilities
 │   └── types/bulkv2.d.ts             # Type definitions
 ├── test/
 │   ├── utilities/                    # Utility tests
-│   └── commands/siri/data/bulkv2/    # Command tests (80+ cases)
+│   └── commands/siri/data/           # Command tests (TestContext + MockTestOrgData)
 ├── messages/
-│   ├── hello.world.md
-│   └── siri.data.bulkv2.md           # CLI message strings
+│   ├── siri.data.bulkv2.md           # CLI message strings
+│   └── siri.data.export.files.md
+├── SECURITY.md                        # Vulnerability reporting and security model
 └── README.md                          # This file
 ```
 
@@ -183,25 +187,25 @@ sf siri data export files \
   --filetype attachment \
   --query "SELECT Id, Name, Body FROM Attachment WHERE ParentId = '001...'" \
   --output-dir ./exports/attachments \
-  --targetusername myorg@example.com
+  --target-org myorg@example.com
 ```
 
 **Features:**
-- Export Attachments, ContentDocuments, Documents, or custom objects
+- Export Attachments, ContentDocuments (ContentVersion) or Documents
 - Filter files using SOQL queries
-- Auto-detects Bulk API vs Standard API based on file volume
 - Creates output directory automatically
-- Sanitizes filenames and handles base64-encoded content
+- Sanitizes filenames (path separators, `..`, control characters, Windows reserved names) so a
+  malicious record name cannot write outside the output directory
 - Validates write permissions before export
+- Exits non-zero when any file fails so CI pipelines can detect partial exports
 
 **Options:**
-- `-t, --filetype=<string>` - (Required) File type: `attachment`, `contentdocument`, `document`, `custom`
+- `-o, --target-org=<string>` - Username or alias of the target org (defaults to the configured default org)
+- `-t, --filetype=<string>` - (Required) File type: `attachment`, `contentdocument`, `document`
 - `-q, --query=<string>` - (Required) SOQL query to select files
-- `-o, --output-dir=<string>` - (Required) Local directory for exported files
-- `--custom-object=<string>` - (Required for custom type) Custom object name
-- `--custom-file-field=<string>` - [default: FileContent__c] File content field name
-- `--custom-name-field=<string>` - [default: Name] Filename field name
-- `--use-bulk-api` - Force Bulk API for any batch size
+- `-d, --output-dir=<string>` - (Required) Local directory for exported files
+- `-c, --concurrency=<integer>` - [default: 10] Parallel downloads per batch (1-50)
+- `--max-file-size=<integer>` - [default: 104857600] Skip files larger than this many bytes
 - `--json` - Output results as JSON
 
 **Examples:**
@@ -222,17 +226,6 @@ sf siri data export files \
   --output-dir ./files
 ```
 
-Export from custom object:
-```bash
-sf siri data export files \
-  --filetype custom \
-  --custom-object DocumentStore__c \
-  --custom-file-field Document__c \
-  --custom-name-field DocumentName__c \
-  --query "SELECT Id, DocumentName__c, Document__c FROM DocumentStore__c" \
-  --output-dir ./custom-exports
-```
-
 ### `sf siri data bulkv2 insert`
 
 Insert records using Bulk API v2.
@@ -241,21 +234,26 @@ Insert records using Bulk API v2.
 sf siri data bulkv2 insert \
   --sobjecttype Account \
   --csvfile accounts.csv \
-  --targetusername myorg@example.com
+  --target-org myorg@example.com
 ```
 
 **Options:**
+- `-o, --target-org=<string>` - Username or alias of the target org (defaults to the configured default org)
+- `-a, --api-version=<string>` - Override the API version used for the request
 - `-s, --sobjecttype=<string>` - (Required) sObject type to insert into
 - `-f, --csvfile=<string>` - (Required) Path to CSV file with data
 - `-l, --lineending=<string>` - [default: LF] Line ending (LF or CRLF)
 - `-d, --columndelimiter=<string>` - [default: COMMA] Delimiter (COMMA, PIPE, TAB, etc.)
+
+All `bulkv2` commands accept `--target-org` and `--api-version`. Always pass `--target-org` explicitly when
+scripting against production so a changed default org can never redirect a data load.
 
 ### `sf siri data bulkv2 update`
 
 Update existing records using Bulk API v2.
 
 ```bash
-sf siri data bulkv2 update --sobjecttype Account --csvfile updates.csv --targetusername myorg@example.com
+sf siri data bulkv2 update --sobjecttype Account --csvfile updates.csv --target-org myorg@example.com
 ```
 
 Same options as insert.
@@ -269,7 +267,7 @@ sf siri data bulkv2 upsert \
   --sobjecttype Account \
   --externalid External_ID__c \
   --csvfile accounts.csv \
-  --targetusername myorg@example.com
+  --target-org myorg@example.com
 ```
 
 **Additional Option:**
@@ -281,10 +279,10 @@ Delete or hard delete records.
 
 ```bash
 # Soft delete
-sf siri data bulkv2 delete --sobjecttype Account --csvfile ids.csv --targetusername myorg@example.com
+sf siri data bulkv2 delete --sobjecttype Account --csvfile ids.csv --target-org myorg@example.com
 
 # Hard delete
-sf siri data bulkv2 delete --sobjecttype Account --csvfile ids.csv --hard --targetusername myorg@example.com
+sf siri data bulkv2 delete --sobjecttype Account --csvfile ids.csv --hard --target-org myorg@example.com
 ```
 
 **Additional Option:**
@@ -299,24 +297,25 @@ sf siri data bulkv2 query \
   --sobjecttype Account \
   --query "SELECT Id, Name, Industry FROM Account" \
   --outputfile results.csv \
-  --targetusername myorg@example.com
+  --target-org myorg@example.com
 ```
 
 **Options:**
 - `-s, --sobjecttype=<string>` - (Required) sObject type for context
 - `-q, --query=<string>` - (Required) SOQL query to execute
-- `-o, --outputfile=<string>` - (Required) Output CSV file path
+- `-f, --outputfile=<string>` - Output CSV file path; when omitted only the job is created and its ID is printed
 
 ### `sf siri data bulkv2 status`
 
 Check the status of an in-progress or completed job.
 
 ```bash
-sf siri data bulkv2 status --jobid 750xx0000000044AAA --targetusername myorg@example.com
+sf siri data bulkv2 status --jobid 750xx0000000044AAA --target-org myorg@example.com
 ```
 
 **Options:**
-- `-i, --jobid=<string>` - (Required) Job ID to check
+- `-i, --jobid=<string>` - (Required) Job ID to check (15 or 18 character Salesforce ID)
+- `-t, --type=<string>` - [default: STATUS] `STATUS` for ingest jobs, `QUERY` for query jobs
 
 ### `sf siri data bulkv2 results`
 
@@ -327,13 +326,13 @@ sf siri data bulkv2 results \
   --jobid 750xx0000000044AAA \
   --type success \
   --outputfile results.csv \
-  --targetusername myorg@example.com
+  --target-org myorg@example.com
 ```
 
 **Options:**
-- `-i, --jobid=<string>` - (Required) Job ID
-- `-t, --type=<string>` - (Required) Result type (success, failed, unprocessed,QUERY_RESULT,QUERY_STATUS)
-- `-o, --outputfile=<string>` - (Required) Output file path
+- `-i, --jobid=<string>` - (Required) Job ID (15 or 18 character Salesforce ID)
+- `-t, --type=<string>` - [default: success] Result type (`success`, `failed`, `unprocessed`, `QUERY_RESULT`)
+- `-f, --outputfile=<string>` - (Required) Output file path
 
 ## For More Help
 
@@ -365,7 +364,7 @@ We appreciate contributions! Please follow these steps:
 
 ### Large File Handling
 
-Files larger than 20MB are automatically split into chunks for optimal performance. This is handled transparently by the plugin.
+Files larger than 100MB are automatically split into chunks so that no single upload exceeds the Bulk API 2.0 limit. Chunks are written to a private temporary directory (owner-only permissions) and removed when the command finishes, even on failure.
 
 ### Authentication Errors
 
@@ -378,6 +377,17 @@ sf org login web --alias myorg
 ### Permission Errors
 
 Hard delete operations require the "Bulk API Hard Delete" permission in your Salesforce org.
+
+## Security
+
+- The plugin reuses the org authentication managed by the Salesforce CLI and never stores credentials itself.
+- Access tokens are only sent to the selected org's instance URL over HTTPS and are stripped from error output.
+- Job IDs are validated as Salesforce IDs before use, exported file names are sanitized, and temporary CSV
+  chunks are created with owner-only permissions.
+- `yarn.lock` is committed, CI installs with `--frozen-lockfile` and fails on high-severity audit findings,
+  and Dependabot keeps dependencies current.
+
+To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 ## Resources
 
