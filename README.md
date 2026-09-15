@@ -2,7 +2,7 @@
 
 > **Named after my daughter, Siri** 🎉
 
-[![NPM](https://img.shields.io/npm/v/siri.svg?label=siri)](https://www.npmjs.com/package/siri) [![Downloads/week](https://img.shields.io/npm/dw/siri.svg)](https://npmjs.org/package/siri) [![License](https://img.shields.io/badge/License-BSD%203--Clause-brightgreen.svg)](https://raw.githubusercontent.com/VenkatKoppolu/venkat-cli/main/LICENSE.txt)
+[![NPM](https://img.shields.io/npm/v/siri.svg?label=siri)](https://www.npmjs.com/package/siri) [![Downloads/week](https://img.shields.io/npm/dw/siri.svg)](https://npmjs.org/package/siri) [![License](https://img.shields.io/badge/License-BSD%203--Clause-brightgreen.svg)](https://raw.githubusercontent.com/VenkatKoppolu/siri-cli/main/LICENSE.txt)
 
 A production-grade Salesforce CLI plugin for efficient bulk data operations using the Salesforce Bulk API v2. Perform high-performance insert, update, upsert, delete, and query operations on large datasets with built-in progress tracking and comprehensive error handling.
 
@@ -81,8 +81,8 @@ sf siri data bulkv2 results \
 
 ```bash
 # Clone the repository
-git clone https://github.com/VenkatKoppolu/venkat-cli.git
-cd venkat-cli
+git clone https://github.com/VenkatKoppolu/siri-cli.git
+cd siri-cli
 
 # Install dependencies
 yarn install
@@ -391,4 +391,4 @@ This project is licensed under the BSD 3-Clause License. See [LICENSE](LICENSE.t
 
 ## Support & Issues
 
-Found a bug or have a feature request? Please [create an issue](https://github.com/VenkatKoppolu/venkat-cli/issues) on GitHub.
+Found a bug or have a feature request? Please [create an issue](https://github.com/VenkatKoppolu/siri-cli/issues) on GitHub.
