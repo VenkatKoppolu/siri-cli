@@ -197,6 +197,49 @@ describe('BulkV2 Utility', () => {
     });
   });
 
+  describe('processResultsRecursive locator pagination', () => {
+    beforeEach(() => {
+      // Writing the stream to disk is irrelevant to locator handling.
+      sinon.stub(BulkV2, 'fastFileWrite').resolves();
+    });
+
+    const makeResponse = (locator: string) => ({ data: {} as any, headers: { 'sforce-locator': locator } });
+
+    it("stops immediately when the first page's locator is the literal string 'null'", async () => {
+      // Salesforce returns 'null' (not '') on the final/only page. The old code
+      // treated 'null' as a real locator and fired a ?locator=null request → HTTP 400.
+      const moreResults = sinon.stub(bulkv2 as any, 'moreResults').resolves(makeResponse('null'));
+
+      const result = await (bulkv2 as any).processResultsRecursive('out.csv', makeResponse('null'), 'http://test.com');
+
+      expect(result).to.equal(true);
+      expect(moreResults.called).to.equal(false);
+    });
+
+    it('stops immediately when the locator header is an empty string', async () => {
+      const moreResults = sinon.stub(bulkv2 as any, 'moreResults').resolves(makeResponse(''));
+
+      const result = await (bulkv2 as any).processResultsRecursive('out.csv', makeResponse(''), 'http://test.com');
+
+      expect(result).to.equal(true);
+      expect(moreResults.called).to.equal(false);
+    });
+
+    it("paginates until a page returns the 'null' locator", async () => {
+      const moreResults = sinon.stub(bulkv2 as any, 'moreResults');
+      moreResults.onFirstCall().resolves(makeResponse('page2'));
+      moreResults.onSecondCall().resolves(makeResponse('null'));
+
+      const result = await (bulkv2 as any).processResultsRecursive('out.csv', makeResponse('page1'), 'http://test.com');
+
+      expect(result).to.equal(true);
+      expect(moreResults.callCount).to.equal(2);
+      // Never requests the terminal 'null' locator itself.
+      expect(moreResults.getCall(0).args[1]).to.equal('page1');
+      expect(moreResults.getCall(1).args[1]).to.equal('page2');
+    });
+  });
+
   describe('error handling', () => {
     it('should throw error in moreResults when request fails', async () => {
       sinon.stub(axios, 'get').rejects(new Error('Network error'));
