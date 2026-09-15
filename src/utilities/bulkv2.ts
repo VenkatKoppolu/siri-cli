@@ -298,7 +298,13 @@ export class BulkV2 {
   ): Promise<boolean> {
     try {
       await BulkV2.fastFileWrite(file, response.data);
-      let locator: string = response.headers['sforce-locator'] as string;
+      // Salesforce Bulk API 2.0 returns the literal string 'null' in the
+      // Sforce-Locator header once the final page has been reached.
+      const normalizeLocator = (value: unknown): string => {
+        const str = (value as string) || '';
+        return str === 'null' ? '' : str;
+      };
+      let locator: string = normalizeLocator(response.headers['sforce-locator']);
       const filename = file.substring(0, file.length - 4);
       let i = 0;
 
@@ -307,7 +313,7 @@ export class BulkV2 {
         const nextFile = filename + i + '.csv';
         // eslint-disable-next-line no-await-in-loop
         const res = await this.moreResults(endpoint, locator, nextFile);
-        locator = (res.headers['sforce-locator'] as string) || '';
+        locator = normalizeLocator(res.headers['sforce-locator']);
       }
       return true;
     } catch (err) {

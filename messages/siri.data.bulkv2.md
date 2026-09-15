@@ -100,7 +100,7 @@ Fetch and export success, failed, or unprocessed records from a completed bulk j
 
 # results.examples
 
-sf siri data bulkv2 results -i 7505r0000xxxxxxxxx -t success -o /csv/output/file/path/csvfile.csv
+sf siri data bulkv2 results -i 7505r0000xxxxxxxxx -t success -f /csv/output/file/path/csvfile.csv
 
 # results.failure
 
@@ -126,111 +126,88 @@ The target org for the command
 
 # flags.csvfile.summary
 
-(required) the path to the CSV file that defines the records to upsert
+Path to the CSV file containing the records to process.
 
 # flags.csvfile.description
 
-(required) the path to the CSV file that defines the records to upsert
+The CSV file must have a header row whose column names match the API names of the fields on the sObject. For delete operations only an Id column is required. Files larger than the Bulk API v2 limit are split into multiple jobs automatically.
 
 # flags.sobjecttype.summary
 
-(required) the sObject type of the records you want to upsert
+API name of the sObject to operate on.
 
 # flags.sobjecttype.description
 
-(required) the sObject type of the records you want to upsert
+The API name of the standard or custom object that the records belong to, for example Account or Invoice__c.
 
 # flags.columndelimiter.summary
 
-The column delimiter used for CSV job data. The default value is COMMA. Valid values are:
-BACKQUOTE—backquote character (`)
-CARET—caret character (^)
-COMMA—comma character (,) which is the default delimiter
-PIPE—pipe character (|)
-SEMICOLON—semicolon character (;)
-TAB—tab character
+Column delimiter used in the CSV job data.
 
 # flags.columndelimiter.description
 
-The column delimiter used for CSV job data. The default value is COMMA. Valid values are:
-BACKQUOTE—backquote character (`)
-CARET—caret character (^)
-COMMA—comma character (,) which is the default delimiter
-PIPE—pipe character (|)
-SEMICOLON—semicolon character (;)
-TAB—tab character
+Valid values are BACKQUOTE (`), CARET (^), COMMA (,), PIPE (|), SEMICOLON (;) and TAB. The default is COMMA.
 
 # flags.lineending.summary
 
-(optional) The line ending used for CSV job data, marking the end of a data row. The default is LF. 
-Valid values are:
-LF—linefeed character
-CRLF—carriage return character followed by a linefeed character
+Line ending used in the CSV job data.
 
 # flags.lineending.description
 
-(optional) The line ending used for CSV job data, marking the end of a data row. The default is LF. 
-Valid values are:
-LF—linefeed character
-CRLF—carriage return character followed by a linefeed character
+Valid values are LF (linefeed) and CRLF (carriage return followed by linefeed). The default is LF.
 
 # flags.externalid.summary
 
-(required) the column name of the external ID
+Name of the external ID field used to match records.
 
 # flags.externalid.description
 
-(required) the column name of the external ID
-
+The API name of an external ID field on the sObject. Records whose external ID value matches an existing record are updated, all others are inserted.
 
 # flags.hard.summary
 
-(optional) if specified then the deleted records aren't stored in the Recycle Bin.
- permission "Bulk API Hard Delete" should be set for the user to perform hard.
+Permanently delete records instead of moving them to the Recycle Bin.
 
 # flags.hard.description
 
-(optional) if specified then the deleted records aren't stored in the Recycle Bin.
- permission "Bulk API Hard Delete" should be set for the user to perform hard.
-
+Hard-deleted records cannot be restored. The running user needs the "Bulk API Hard Delete" permission, otherwise the job fails.
 
 # flags.query.summary
 
-(required) Specify the SOQL query
+SOQL query to execute.
 
 # flags.query.description
 
-(required) Specify the SOQL query
+The SOQL query whose results are streamed to the output CSV file. Wrap the query in quotes so the shell passes it as a single argument.
 
 # flags.outputfile.summary
 
-(required) path to the csv file to which the results will be written.
+Path to the CSV file where results are written.
 
 # flags.outputfile.description
 
-(required) path to the csv file to which the results will be written.
+The file is created if it does not exist and overwritten if it does. Parent directories must already exist.
 
 # flags.jobid.summary
 
-(required) the job id that is operated in the org.
+ID of the Bulk API v2 job.
 
 # flags.jobid.description
 
-(required) the job id that is operated in the org.
+The 18-character job ID returned when the job was created, for example 7505r0000xxxxxxxxx.
 
 # flags.type.summary
 
-(required) specify one of success, failed and unprocessed values to get respective results from the job. The default is success. 
+Type of results to download.
 
 # flags.type.description
 
-(required) specify one of success, failed and unprocessed values to get respective results from the job. The default is success. 
-
+Valid values are SUCCESS, FAILED, UNPROCESSED, QUERY_RESULT and QUERY_STATUS. Use SUCCESS, FAILED or UNPROCESSED for ingest jobs and QUERY_RESULT or QUERY_STATUS for query jobs. The default is SUCCESS.
 
 # flags.statustype.summary
 
-(optional) specify one of STATUS, QUERY values to get respective status of the job. The default is STATUS. 
+Kind of job whose status to check.
 
 # flags.statustype.description
 
-(optional) specify one of STATUS, QUERY values to get respective status of the job. The default is STATUS. 
+Valid values are STATUS for ingest jobs (insert, update, upsert, delete) and QUERY for query jobs. The default is STATUS.
