@@ -5,6 +5,7 @@
 /* eslint-disable @typescript-eslint/no-unsafe-argument */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable @typescript-eslint/no-var-requires */
+/* eslint-disable @typescript-eslint/no-unsafe-return */
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -161,7 +162,7 @@ describe('BulkV2 Utility', () => {
       expect(dataRows).to.deep.equal(rows.slice().sort());
     });
 
-    it('cleanupTempFiles removes every generated chunk', async () => {
+    it('cleanupTempFiles removes every generated chunk and the private directory', async () => {
       const file = path.join(tmpDir, 'big.csv');
       fs.writeFileSync(file, `Id\n${Array.from({ length: 10 }, (_, i) => `00${i}`).join('\n')}\n`);
       sinon.stub(bulkv2 as any, 'getFilesizeInMegaBytes').returns(150);
@@ -169,9 +170,33 @@ describe('BulkV2 Utility', () => {
 
       const result = await bulkv2.checkFileSizeAndAct(file);
       expect(result.every((f) => fs.existsSync(f))).to.equal(true);
+      const chunkDir = path.dirname(result[0]);
 
       bulkv2.cleanupTempFiles();
       expect(result.some((f) => fs.existsSync(f))).to.equal(false);
+      expect(fs.existsSync(chunkDir)).to.equal(false);
+    });
+
+    it('writes chunks into a fresh owner-only temp directory with 0600 files', async function () {
+      if (process.platform === 'win32') {
+        this.skip();
+      }
+      const file = path.join(tmpDir, 'big.csv');
+      fs.writeFileSync(file, `Id\n${Array.from({ length: 10 }, (_, i) => `00${i}`).join('\n')}\n`);
+      sinon.stub(bulkv2 as any, 'getFilesizeInMegaBytes').returns(150);
+      (bulkv2 as any).maxChunkBytes = 16;
+
+      const result = await bulkv2.checkFileSizeAndAct(file);
+
+      const chunkDir = path.dirname(result[0]);
+      expect(path.basename(chunkDir).startsWith('siri-bulkv2-')).to.equal(true);
+      expect(chunkDir).to.not.equal(os.tmpdir());
+      // eslint-disable-next-line no-bitwise
+      expect(fs.statSync(chunkDir).mode & 0o777).to.equal(0o700);
+      for (const chunk of result) {
+        // eslint-disable-next-line no-bitwise
+        expect(fs.statSync(chunk).mode & 0o777, chunk).to.equal(0o600);
+      }
     });
   });
 
@@ -248,8 +273,83 @@ describe('BulkV2 Utility', () => {
         await (bulkv2 as any).moreResults('http://test.com', 'locator', 'output.csv');
         expect.fail('Should have thrown error');
       } catch (err) {
-        expect((err as any).name).to.equal('FetchResultsError');
+        expect((err as any).name).to.equal('BulkApiError');
+        expect((err as any).message).to.include('Network error');
       }
+    });
+
+    it('wraps status failures instead of leaking the raw axios error', async () => {
+      const axiosErr: any = new Error('Request failed with status code 404');
+      axiosErr.isAxiosError = true;
+      axiosErr.response = { status: 404, data: [{ errorCode: 'NOT_FOUND', message: 'no such job' }] };
+      sinon.stub(axios, 'get').rejects(axiosErr);
+
+      try {
+        await bulkv2.status('750xx0000000044AAA', 'STATUS');
+        expect.fail('Should have thrown error');
+      } catch (err) {
+        expect((err as any).name).to.equal('BulkApiError');
+        expect((err as any).message).to.include('HTTP 404');
+        expect((err as any).message).to.include('NOT_FOUND');
+      }
+    });
+
+    it('redacts the bearer token from the axios error kept as cause', async () => {
+      const config = { headers: { Authorization: 'Bearer super-secret-token', 'Content-Type': 'application/json' } };
+      const axiosErr: any = new Error('Request failed with status code 401');
+      axiosErr.isAxiosError = true;
+      axiosErr.config = config;
+      axiosErr.request = { _header: 'Authorization: Bearer super-secret-token' };
+      axiosErr.response = { status: 401, data: 'Session expired', config, request: axiosErr.request };
+      sinon.stub(axios, 'post').rejects(axiosErr);
+
+      try {
+        await (bulkv2 as any).createJob({ sobjecttype: 'Account', operation: 'insert' });
+        expect.fail('Should have thrown error');
+      } catch (err) {
+        const cause = (err as any).cause;
+        expect(cause).to.equal(axiosErr);
+        expect(cause.config.headers).to.not.have.property('Authorization');
+        expect(cause.config.headers['Content-Type']).to.equal('application/json');
+        expect(cause.request).to.equal(undefined);
+        expect(cause.response.request).to.equal(undefined);
+        expect(JSON.stringify(err)).to.not.include('super-secret-token');
+      }
+    });
+
+    it('encodes the locator before appending it to the results URL', async () => {
+      const get = sinon.stub(axios, 'get').resolves({ data: {} as any, headers: {} } as any);
+      sinon.stub(BulkV2, 'fastFileWrite').resolves();
+
+      await bulkv2.moreResults('https://test.salesforce.com/results', 'a b/c?d=e', 'out.csv');
+
+      expect(get.firstCall.args[0]).to.equal('https://test.salesforce.com/results?locator=a%20b%2Fc%3Fd%3De');
+    });
+  });
+
+  describe('generateEndpoint', () => {
+    it('builds the status URL from the connection and a valid job ID', () => {
+      const endpoint = (bulkv2 as any).generateEndpoint('STATUS', '750xx0000000044AAA');
+
+      expect(endpoint).to.equal('https://test.salesforce.com/services/data/v59.0/jobs/ingest/750xx0000000044AAA');
+    });
+
+    it('accepts 15-character job IDs', () => {
+      expect(() => (bulkv2 as any).generateEndpoint('QUERY_STATUS', '750xx0000000044')).to.not.throw();
+    });
+
+    it('rejects job IDs that are not Salesforce IDs before they reach the URL', () => {
+      for (const bad of ['../../sobjects/Account', '750xx0000000044AAA/batches', 'job1', '', ' ']) {
+        if (bad === '') continue; // empty means "no job id" for create/query endpoints
+        expect(() => (bulkv2 as any).generateEndpoint('STATUS', bad), bad).to.throw(SfError, 'Invalid job ID');
+      }
+    });
+
+    it('throws on an unknown operation', () => {
+      expect(() => (bulkv2 as any).generateEndpoint('NOPE', '750xx0000000044AAA')).to.throw(
+        SfError,
+        'Unknown operation'
+      );
     });
 
     it('surfaces the Salesforce response body when createJob fails', async () => {
@@ -279,7 +379,7 @@ describe('BulkV2 Utility', () => {
       sinon.stub(axios, 'put').rejects(axiosErr);
 
       try {
-        await (bulkv2 as any).uploadJob({ id: 'job1' }, file);
+        await (bulkv2 as any).uploadJob({ id: '750xx0000000044AAA' }, file);
         expect.fail('Should have thrown error');
       } catch (err) {
         expect((err as any).name).to.equal('BulkApiError');

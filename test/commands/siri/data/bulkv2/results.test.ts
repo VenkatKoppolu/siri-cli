@@ -1,158 +1,73 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment */
-/* eslint-disable @typescript-eslint/no-unsafe-call */
-/* eslint-disable @typescript-eslint/no-unsafe-member-access */
-/* eslint-disable @typescript-eslint/no-unsafe-argument */
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import { expect } from 'chai';
-import * as sinon from 'sinon';
-import { stubInterface } from '@salesforce/ts-sinon';
-import { Connection, Org } from '@salesforce/core';
-import BulkV2Results from '../../../../src/commands/siri/data/bulkv2/results.js';
-import { BulkV2 } from '../../../../src/utilities/bulkv2.js';
+import { SinonStub } from 'sinon';
+import { TestContext, MockTestOrgData } from '@salesforce/core/testSetup';
+import { stubSfCommandUx, stubSpinner } from '@salesforce/sf-plugins-core';
+import BulkV2Results from '../../../../../src/commands/siri/data/bulkv2/results.js';
+import { BulkV2 } from '../../../../../src/utilities/bulkv2.js';
+import { expectReject } from '../../../../helpers/bulkv2.js';
 
-describe('siri:data:bulkv2:results', () => {
-  let connectionStub: sinon.SinonStubbedInstance<Connection>;
-  let bulkV2ResultsStub: sinon.SinonStub;
+describe('siri data bulkv2 results', () => {
+  const $$ = new TestContext();
+  const testOrg = new MockTestOrgData();
+  let resultsStub: SinonStub;
+  let uxStubs: ReturnType<typeof stubSfCommandUx>;
+  let spinnerStubs: ReturnType<typeof stubSpinner>;
 
-  beforeEach(() => {
-    connectionStub = stubInterface<Connection>(sinon);
-    connectionStub.accessToken = 'test-token';
-    connectionStub.instanceUrl = 'https://test.salesforce.com';
-    connectionStub.getApiVersion.returns('59.0');
+  const jobId = '750xx0000000044AAA';
+  const baseArgs = ['--target-org', testOrg.username, '--jobid', jobId, '--outputfile', 'results.csv'];
 
-    sinon.stub(Org, 'create').resolves({
-      getConnection: () => connectionStub,
-    } as any);
-
-    bulkV2ResultsStub = sinon.stub(BulkV2.prototype, 'results').resolves(true);
+  beforeEach(async () => {
+    await $$.stubAuths(testOrg);
+    uxStubs = stubSfCommandUx($$.SANDBOX);
+    spinnerStubs = stubSpinner($$.SANDBOX);
+    resultsStub = $$.SANDBOX.stub(BulkV2.prototype, 'results').resolves(true);
   });
 
   afterEach(() => {
-    sinon.restore();
+    $$.restore();
   });
 
-  it('should execute results command with required flags', async () => {
-    const cmd = new BulkV2Results([]);
-    sinon.stub(cmd.spinner, 'start');
-    sinon.stub(cmd.spinner, 'stop');
-    sinon.stub(cmd, 'log');
+  it('fetches results with the default SUCCESS type and logs the output file', async () => {
+    await BulkV2Results.run(baseArgs);
 
-    await (cmd as any).run([
-      '--jobid',
-      '750xx0000000049AAA',
-      '--outputfile',
-      'results.csv',
-    ]);
-
-    expect(bulkV2ResultsStub.called).to.be.true;
+    expect(resultsStub.calledOnceWithExactly(jobId, 'SUCCESS', 'results.csv')).to.be.true;
+    expect(uxStubs.log.calledOnce).to.be.true;
+    expect(String(uxStubs.log.firstCall.args[0])).to.include('results.csv');
   });
 
-  it('should require jobid flag', async () => {
-    const cmd = new BulkV2Results([]);
-    sinon.stub(cmd.spinner, 'start');
-    sinon.stub(cmd.spinner, 'stop');
+  it('upper-cases the --type flag before calling BulkV2.results', async () => {
+    await BulkV2Results.run([...baseArgs, '--type', 'failed']);
 
-    try {
-      await (cmd as any).run([
-        '--outputfile',
-        'results.csv',
-      ]);
-      expect.fail('Should require jobid');
-    } catch (err) {
-      expect((err as any).message).to.include('Required flag');
-    }
+    expect(resultsStub.firstCall.args[1]).to.equal('FAILED');
   });
 
-  it('should require outputfile flag', async () => {
-    const cmd = new BulkV2Results([]);
-    sinon.stub(cmd.spinner, 'start');
-    sinon.stub(cmd.spinner, 'stop');
+  it('does not log a success message when the job is still running', async () => {
+    resultsStub.resolves(false);
 
-    try {
-      await (cmd as any).run([
-        '--jobid',
-        '750xx0000000049AAA',
-      ]);
-      expect.fail('Should require outputfile');
-    } catch (err) {
-      expect((err as any).message).to.include('Required flag');
-    }
+    await BulkV2Results.run(baseArgs);
+
+    expect(uxStubs.log.called).to.be.false;
   });
 
-  it('should pass jobid, type and outputfile to BulkV2.results', async () => {
-    const cmd = new BulkV2Results([]);
-    sinon.stub(cmd.spinner, 'start');
-    sinon.stub(cmd.spinner, 'stop');
-    sinon.stub(cmd, 'log');
+  it('requires --jobid and --outputfile', async () => {
+    const missingJob = await expectReject(() =>
+      BulkV2Results.run(['--target-org', testOrg.username, '--outputfile', 'results.csv'])
+    );
+    const missingFile = await expectReject(() =>
+      BulkV2Results.run(['--target-org', testOrg.username, '--jobid', jobId])
+    );
 
-    const jobId = '750xx0000000049AAA';
-    const outputFile = 'results.csv';
-    const resultType = 'success';
-
-    await (cmd as any).run([
-      '--jobid',
-      jobId,
-      '--outputfile',
-      outputFile,
-      '--type',
-      resultType,
-    ]);
-
-    const callArgs = bulkV2ResultsStub.getCall(0).args;
-    expect(callArgs[0]).to.equal(jobId);
-    expect(callArgs[1]).to.equal(resultType.toUpperCase());
-    expect(callArgs[2]).to.equal(outputFile);
+    expect(missingJob.message).to.match(/Missing required flag/);
+    expect(missingFile.message).to.match(/Missing required flag/);
+    expect(resultsStub.called).to.be.false;
   });
 
-  it('should use default type when not provided', async () => {
-    const cmd = new BulkV2Results([]);
-    sinon.stub(cmd.spinner, 'start');
-    sinon.stub(cmd.spinner, 'stop');
-    sinon.stub(cmd, 'log');
+  it('stops the spinner and rethrows when fetching fails', async () => {
+    resultsStub.rejects(new Error('Results exploded'));
 
-    await (cmd as any).run([
-      '--jobid',
-      '750xx0000000049AAA',
-      '--outputfile',
-      'results.csv',
-    ]);
+    const err = await expectReject(() => BulkV2Results.run(baseArgs));
 
-    const callArgs = bulkV2ResultsStub.getCall(0).args;
-    expect(callArgs[1]).to.equal('LF');
-  });
-
-  it('should log success message when results written', async () => {
-    const cmd = new BulkV2Results([]);
-    sinon.stub(cmd.spinner, 'start');
-    sinon.stub(cmd.spinner, 'stop');
-    const logStub = sinon.stub(cmd, 'log');
-
-    await (cmd as any).run([
-      '--jobid',
-      '750xx0000000049AAA',
-      '--outputfile',
-      'results.csv',
-    ]);
-
-    expect(logStub.called).to.be.true;
-  });
-
-  it('should stop spinner on error', async () => {
-    bulkV2ResultsStub.rejects(new Error('Results Error'));
-    const cmd = new BulkV2Results([]);
-    sinon.stub(cmd.spinner, 'start');
-    const stopStub = sinon.stub(cmd.spinner, 'stop');
-
-    try {
-      await (cmd as any).run([
-        '--jobid',
-        '750xx0000000049AAA',
-        '--outputfile',
-        'results.csv',
-      ]);
-      expect.fail('Should have thrown error');
-    } catch (err) {
-      expect(stopStub.called).to.be.true;
-    }
+    expect(err.message).to.include('Results exploded');
+    expect(spinnerStubs.stop.called).to.be.true;
   });
 });

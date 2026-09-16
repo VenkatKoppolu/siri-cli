@@ -1,5 +1,5 @@
 import { SfCommand, Flags } from '@salesforce/sf-plugins-core';
-import { Messages, Org, SfError } from '@salesforce/core';
+import { Messages, SfError } from '@salesforce/core';
 import { BulkV2Input, JobInfo } from '../../../../types/bulkv2.js';
 import { BulkV2 } from '../../../../utilities/bulkv2.js';
 
@@ -17,6 +17,14 @@ export default class BulkV2Insert extends SfCommand<BulkV2InsertResult> {
   public static readonly examples = messages.getMessages('insert.examples');
 
   public static readonly flags = {
+    'target-org': Flags.requiredOrg({
+      char: 'o',
+      summary: messages.getMessage('flags.target-org.summary'),
+    }),
+    'api-version': Flags.orgApiVersion({
+      char: 'a',
+      summary: messages.getMessage('flags.api-version.summary'),
+    }),
     sobjecttype: Flags.string({
       char: 's',
       summary: messages.getMessage('flags.sobjecttype.summary'),
@@ -45,24 +53,16 @@ export default class BulkV2Insert extends SfCommand<BulkV2InsertResult> {
     }),
   };
 
-  protected static requiresUsername = true;
-
   public async run(): Promise<BulkV2InsertResult> {
     const { flags } = await this.parse(BulkV2Insert);
 
-    // Start the spinner
     this.spinner.start('BulkV2 Insert');
 
     try {
-      // Create the Org instance
-      const org = await Org.create();
-
-      // Retrieve the connection
-      const connection = org.getConnection();
-      // Instantiate BulkV2 utility
+      // The org is resolved from --target-org (or the configured default org).
+      const connection = flags['target-org'].getConnection(flags['api-version']);
       const bulkv2 = new BulkV2(connection);
 
-      // Define the input for BulkV2 operation
       const input: BulkV2Input = {
         sobjecttype: flags.sobjecttype,
         operation: 'insert',
@@ -71,23 +71,13 @@ export default class BulkV2Insert extends SfCommand<BulkV2InsertResult> {
         delimiter: flags.columndelimiter,
       };
 
-      // Perform the operation
       const response: JobInfo = await bulkv2.operate(input);
-
-      // Log the response
       this.log(messages.getMessage('info.jobDetails', [response.id, response.id]));
-
-      // Stop the spinner
-      this.spinner.stop();
-
-      // Return the response
       return response;
     } catch (err) {
-      // Stop the spinner in case of error
-      this.spinner.stop();
-
-      // Rethrow the error for propagation
       throw SfError.wrap(err);
+    } finally {
+      this.spinner.stop();
     }
   }
 }

@@ -120,9 +120,13 @@ Remove records at scale using the Salesforce Bulk API v2 with support for soft d
 sf siri data bulkv2 delete -s Account -f /csv/file/path/csvfile.csv
 sf siri data bulkv2 delete -s Account --hard -f /csv/file/path/csvfile.csv
 
-# flags.targetorg.summary
+# flags.target-org.summary
 
-The target org for the command
+Username or alias of the target org. Not required if the `target-org` configuration variable is already set.
+
+# flags.api-version.summary
+
+Override the API version used for API requests made by this command.
 
 # flags.csvfile.summary
 
