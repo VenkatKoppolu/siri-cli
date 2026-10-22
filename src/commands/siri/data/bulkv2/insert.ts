@@ -9,7 +9,7 @@ Messages.importMessagesDirectoryFromMetaUrl(import.meta.url);
 // Load the specific messages for this file.
 const messages = Messages.loadMessages('siri', 'siri.data.bulkv2');
 
-export type BulkV2InsertResult = JobInfo;
+export type BulkV2InsertResult = JobInfo[];
 
 export default class BulkV2Insert extends SfCommand<BulkV2InsertResult> {
   public static readonly summary = messages.getMessage('insert.summary');
@@ -58,25 +58,35 @@ export default class BulkV2Insert extends SfCommand<BulkV2InsertResult> {
 
     this.spinner.start('BulkV2 Insert');
 
+    const responses: JobInfo[] = [];
+    let bulkv2: BulkV2 | undefined;
     try {
       // The org is resolved from --target-org (or the configured default org).
       const connection = flags['target-org'].getConnection(flags['api-version']);
-      const bulkv2 = new BulkV2(connection);
+      bulkv2 = new BulkV2(connection);
+      const files: string[] = await bulkv2.checkFileSizeAndAct(flags.csvfile);
 
-      const input: BulkV2Input = {
-        sobjecttype: flags.sobjecttype,
-        operation: 'insert',
-        csvfile: flags.csvfile,
-        lineending: flags.lineending,
-        delimiter: flags.columndelimiter,
-      };
+      // eslint-disable-next-line no-await-in-loop
+      for (const file of files) {
+        const input: BulkV2Input = {
+          sobjecttype: flags.sobjecttype,
+          operation: 'insert',
+          csvfile: file,
+          lineending: flags.lineending,
+          delimiter: flags.columndelimiter,
+        };
 
-      const response: JobInfo = await bulkv2.operate(input);
-      this.log(messages.getMessage('info.jobDetails', [response.id, response.id]));
-      return response;
+        // eslint-disable-next-line no-await-in-loop
+        const response: JobInfo = await bulkv2.operate(input);
+        responses.push(response);
+        this.log(messages.getMessage('info.jobDetails', [response.id, response.id]));
+      }
+      return responses;
     } catch (err) {
       throw SfError.wrap(err);
     } finally {
+      // Remove any temp chunk files created when splitting a large CSV.
+      bulkv2?.cleanupTempFiles();
       this.spinner.stop();
     }
   }
