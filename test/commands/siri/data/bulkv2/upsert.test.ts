@@ -10,6 +10,7 @@ describe('siri data bulkv2 upsert', () => {
   const $$ = new TestContext();
   const testOrg = new MockTestOrgData();
   let operateStub: SinonStub;
+  let checkFileSizeStub: SinonStub;
   let spinnerStubs: ReturnType<typeof stubSpinner>;
 
   const baseArgs = [
@@ -28,17 +29,31 @@ describe('siri data bulkv2 upsert', () => {
     stubSfCommandUx($$.SANDBOX);
     spinnerStubs = stubSpinner($$.SANDBOX);
     operateStub = $$.SANDBOX.stub(BulkV2.prototype, 'operate').resolves(mockJob({ operation: 'upsert' }));
+    checkFileSizeStub = $$.SANDBOX.stub(BulkV2.prototype, 'checkFileSizeAndAct').resolves(['upserts.csv']);
+    $$.SANDBOX.stub(BulkV2.prototype, 'cleanupTempFiles');
   });
 
   afterEach(() => {
     $$.restore();
   });
 
-  it('runs the upsert and returns the job info', async () => {
+  it('runs the upsert and returns one job per file', async () => {
     const result = await BulkV2Upsert.run(baseArgs);
 
-    expect(result.id).to.equal('750xx0000000044AAA');
-    expect(result.operation).to.equal('upsert');
+    expect(result).to.have.length(1);
+    expect(result[0].id).to.equal('750xx0000000044AAA');
+    expect(result[0].operation).to.equal('upsert');
+  });
+
+  it('splits the CSV first and runs one job per chunk', async () => {
+    checkFileSizeStub.resolves(['/tmp/chunk-0.csv', '/tmp/chunk-1.csv']);
+
+    const result = await BulkV2Upsert.run(baseArgs);
+
+    expect(checkFileSizeStub.calledOnceWithExactly('upserts.csv')).to.be.true;
+    expect(operateStub.callCount).to.equal(2);
+    expect(operateStub.secondCall.args[0]).to.include({ csvfile: '/tmp/chunk-1.csv' });
+    expect(result).to.have.length(2);
   });
 
   it('passes the external ID field to BulkV2.operate', async () => {

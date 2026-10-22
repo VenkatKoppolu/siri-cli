@@ -10,6 +10,7 @@ describe('siri data bulkv2 insert', () => {
   const $$ = new TestContext();
   const testOrg = new MockTestOrgData();
   let operateStub: SinonStub;
+  let checkFileSizeStub: SinonStub;
   let uxStubs: ReturnType<typeof stubSfCommandUx>;
   let spinnerStubs: ReturnType<typeof stubSpinner>;
 
@@ -20,21 +21,35 @@ describe('siri data bulkv2 insert', () => {
     uxStubs = stubSfCommandUx($$.SANDBOX);
     spinnerStubs = stubSpinner($$.SANDBOX);
     operateStub = $$.SANDBOX.stub(BulkV2.prototype, 'operate').resolves(mockJob({ operation: 'insert' }));
+    checkFileSizeStub = $$.SANDBOX.stub(BulkV2.prototype, 'checkFileSizeAndAct').resolves(['test.csv']);
+    $$.SANDBOX.stub(BulkV2.prototype, 'cleanupTempFiles');
   });
 
   afterEach(() => {
     $$.restore();
   });
 
-  it('runs the insert and returns the job info', async () => {
+  it('runs the insert and returns one job per file', async () => {
     const result = await BulkV2Insert.run(baseArgs);
 
-    expect(result.id).to.equal('750xx0000000044AAA');
-    expect(result.operation).to.equal('insert');
-    expect(result.state).to.equal('UploadComplete');
+    expect(result).to.have.length(1);
+    expect(result[0].id).to.equal('750xx0000000044AAA');
+    expect(result[0].operation).to.equal('insert');
+    expect(result[0].state).to.equal('UploadComplete');
     expect(uxStubs.log.calledOnce).to.be.true;
     expect(spinnerStubs.start.called).to.be.true;
     expect(spinnerStubs.stop.called).to.be.true;
+  });
+
+  it('splits the CSV first and runs one job per chunk', async () => {
+    checkFileSizeStub.resolves(['/tmp/chunk-0.csv', '/tmp/chunk-1.csv']);
+
+    const result = await BulkV2Insert.run(baseArgs);
+
+    expect(checkFileSizeStub.calledOnceWithExactly('test.csv')).to.be.true;
+    expect(operateStub.callCount).to.equal(2);
+    expect(operateStub.secondCall.args[0]).to.include({ csvfile: '/tmp/chunk-1.csv' });
+    expect(result).to.have.length(2);
   });
 
   it('passes the flags to BulkV2.operate with defaults applied', async () => {
